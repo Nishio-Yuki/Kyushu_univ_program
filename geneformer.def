@@ -1,0 +1,149 @@
+Bootstrap: docker
+From: nvidia/cuda:11.7.1-cudnn8-devel-ubuntu22.04
+
+%labels
+    Author "you"
+    Description "scvi-tools + Scanpy + PyTorch (CUDA 11.7) + JupyterLab only"
+    Base "nvidia/cuda:11.7.1-cudnn8-devel-ubuntu22.04"
+
+%environment
+    export PATH=/opt/venv/bin:$PATH
+    export PYTHONUNBUFFERED=1
+    export LC_ALL=C.UTF-8
+    export LANG=C.UTF-8
+    export PYTHONNOUSERSITE=1
+
+%post
+    set -e
+    export DEBIAN_FRONTEND=noninteractive
+
+    # 1) OS パッケージ
+    apt-get update
+    apt-get install -y --no-install-recommends \
+        curl ca-certificates git \
+        python3 python3-venv python3-pip python3-dev \
+        build-essential cmake pkg-config ninja-build \
+        libxml2-dev zlib1g-dev \
+        iproute2 lsof tini
+    rm -rf /var/lib/apt/lists/*
+
+    # 2) venv 作成
+    python3 -m venv /opt/venv
+    . /opt/venv/bin/activate
+    python -m pip install --upgrade pip wheel setuptools
+    pip install --no-cache-dir cmake ninja
+
+    # 3) GPU PyTorch (CUDA 11.7)
+    pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu117 \
+        "torch==2.0.1+cu117" "torchvision==0.15.2+cu117"
+
+    # 4) 科学計算系
+    pip install --no-cache-dir \
+        "numpy<2.0" pandas scikit-learn anndata \
+        h5py tdigest loompy \
+        matplotlib seaborn
+
+    # 5) scRNA / ML 系
+    pip install --no-cache-dir \
+        scanpy==1.9.8 scvi-tools datasets transformers accelerate tensorboard
+
+    # 6) igraph / leidenalg（wheel優先 → フォールバック）
+    (pip install --no-cache-dir --only-binary=:all: \
+        "python-igraph>=0.11,<0.12" "leidenalg>=0.10,<0.12") || true
+
+    python - <<'PY'
+import importlib, subprocess, sys
+for pkg, mod in [("python-igraph","igraph"), ("leidenalg","leidenalg")]:
+    try:
+        importlib.import_module(mod)
+        print(f"[OK] {pkg} wheel available")
+    except Exception:
+        print(f"[BUILD] Installing {pkg} from source…")
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "--no-cache-dir", pkg])
+PY
+
+    # 7) JupyterLab only
+    pip install --no-cache-dir \
+        "jupyterlab==4.3.*" \
+        "jupyter_server==2.*" \
+        "jupyterlab_server==2.*"
+
+    # 8) 作業ディレクトリ
+    mkdir -p /work
+
+    # 9) JupyterLab 起動スクリプト
+    cat >/usr/local/bin/start-jupyter <<'BASH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+IP="${JUPYTER_IP:-0.0.0.0}"
+PORT="${JUPYTER_PORT:-8888}"
+ROOT="${JUPYTER_ROOT:-/work}"
+TOKEN="${JUPYTER_TOKEN:-}"
+STRICT="${JUPYTER_STRICT_PORT:-1}"
+
+unset JUPYTERLAB_DIR JUPYTER_PATH JUPYTER_DATA_DIR JUPYTER_CONFIG_DIR
+mkdir -p "$ROOT"; cd "$ROOT"
+
+# 固定ポート（既定）または自動退避
+if [ "$STRICT" = "1" ]; then
+  if ss -ltn 2>/dev/null | awk '{print $4}' | grep -q ":$PORT$"; then
+    echo "[start-jupyter] ERROR: port $PORT busy. Use another JUPYTER_PORT." >&2
+    exit 1
+  fi
+else
+  if ss -ltn 2>/dev/null | awk '{print $4}' | grep -q ":$PORT$"; then
+    PORT="$(python3 - <<'PY'
+import socket
+with socket.socket() as s:
+    s.bind(('',0))
+    print(s.getsockname()[1])
+PY
+)"
+  fi
+fi
+
+echo "[start-jupyter] ip=$IP port=$PORT root=$ROOT token=${TOKEN:-<auto>}"
+echo "$PORT" > "${ROOT}/.jupyter-port" 2>/dev/null || true
+
+exec /opt/venv/bin/jupyter lab \
+  --no-browser \
+  --ServerApp.ip="$IP" \
+  --ServerApp.port="$PORT" \
+  --ServerApp.port_retries=0 \
+  --ServerApp.root_dir="$ROOT" \
+  --ServerApp.token="$TOKEN"
+BASH
+    chmod +x /usr/local/bin/start-jupyter
+
+    rm -rf /root/.cache/pip
+
+%runscript
+    exec /usr/bin/tini -- /usr/local/bin/start-jupyter
+
+%startscript
+    exec /usr/bin/tini -- /usr/local/bin/start-jupyter
+
+%apprun jupyter
+    exec /usr/bin/tini -- /usr/local/bin/start-jupyter
+
+%apphelp jupyter
+    Launch JupyterLab server (port 8888 by default).
+    Environment variables:
+      JUPYTER_PORT     Port number (default 8888)
+      JUPYTER_TOKEN    Token for access
+      JUPYTER_ROOT     Working directory (default /work)
+      JUPYTER_STRICT_PORT  1=fixed (default), 0=auto-assign
+
+%help
+    CUDA 11.7 + cuDNN8 + PyTorch cu117 + scvi-tools + JupyterLab 4.3 環境。
+    実行例:
+      # CPUノード
+      pjsub --interact -L "rscgrp=a-inter,vnode-core=8,elapse=02:00:00,jobenv=singularity" --sparam "wait-time=900"
+      ssh -N -L 8888:<計算ノード名>:8888 user@genkai.hpc.kyushu-u.ac.jp
+      JUPYTER_PORT=8888 JUPYTER_TOKEN=test123 singularity run -B /path/to/work:/work geneformer_lab.sif
+
+      # GPUノード
+      pjsub --interact -L "rscgrp=b-inter,vnode-core=8,gpu=1,elapse=06:00:00,jobenv=singularity" --sparam "wait-time=900"
+      JUPYTER_PORT=8888 JUPYTER_TOKEN=test123 singularity run --nv -B /path/to/work:/work geneformer_lab.sif
+
