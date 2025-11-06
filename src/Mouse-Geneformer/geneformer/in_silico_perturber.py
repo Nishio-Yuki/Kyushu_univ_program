@@ -45,7 +45,7 @@ import sys
 logger = logging.getLogger(__name__)
 
 
-ISP_device = "0"
+ISP_device = "cuda:0"
 
 
 # load data and filter by defined criteria
