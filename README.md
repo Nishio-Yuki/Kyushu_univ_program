@@ -7,6 +7,7 @@
 - 環境構築
     - `geneformer.def` から sifイメージを作成して，singularity上で実験してください
 - raw_dataから学習データを作成する方法
+    - raw_dataの収集方法は，`document`フォルダに入っているPDFを見てください．現状は`10x Genomics`のみですが今後追加予定です．
     - 九州大学での勉強会では，副腎皮質に関するraw_dataを使用しました．Quality Control (QC) フィルタリングと，Rank value encodingを行ってからGeneformerに入力可能な形式に変換する必要があります．
     - `src/data_processing/data_processing.py`の下記のパスを変更
     
